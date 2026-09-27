@@ -172,6 +172,10 @@ table.tbl td:first-child{color:var(--sub)}
     break-after:page;page-break-after:always;-webkit-print-color-adjust:exact;print-color-adjust:exact}
   #stage > .slide:last-child{break-after:auto;page-break-after:auto}
 }
+.sync-badge{border:1px solid #444;border-radius:99px;padding:4px 10px;font-size:12px;font-weight:700;color:#DDD}
+.sync-badge[hidden]{display:none}
+.sync-login{position:fixed;inset:0;z-index:700;display:flex;align-items:center;justify-content:center;padding:16px;background:rgba(0,0,0,.76)}
+.sync-login[hidden]{display:none}.sync-box{width:min(360px,100%);padding:24px;border-radius:14px;background:#FFF;color:#111;display:flex;flex-direction:column;gap:12px}.sync-box input{min-height:44px;padding:10px;border:1px solid #AAA;border-radius:8px;font:inherit}.sync-box button{min-height:44px;border:0;border-radius:8px;background:#111;color:#FFF;font:inherit;font-weight:800}.sync-error{min-height:1.2em;color:#B71C1C;font-size:13px;font-weight:700}
 </style>
 </head>
 <body>
@@ -321,6 +325,7 @@ table.tbl td:first-child{color:var(--sub)}
   <button type="button" id="navPrev" aria-label="이전 슬라이드">◀</button>
   <span id="counter" aria-live="polite">1 / 20</span>
   <button type="button" id="navNext" aria-label="다음 슬라이드">▶</button>
+  <span id="syncBadge" class="sync-badge" hidden></span>
   <span class="grow"></span>
   <span class="hint hide-sm">← → 이동 · G 전체보기 · P PDF</span>
   <button type="button" id="gridBtn" aria-haspopup="dialog" aria-controls="gridOverlay">▦ 전체 보기</button>
@@ -330,6 +335,10 @@ table.tbl td:first-child{color:var(--sub)}
 <div class="grid-overlay" id="gridOverlay" role="dialog" aria-modal="true" aria-label="전체 슬라이드 보기">
   <div class="grid-head"><h2>전체 보기</h2><button type="button" id="gridClose">닫기 (Esc)</button></div>
   <div class="grid-list" id="gridList"></div>
+</div>
+
+<div id="syncLogin" class="sync-login" hidden role="dialog" aria-modal="true" aria-labelledby="syncLoginTitle">
+  <form id="syncLoginForm" class="sync-box"><h2 id="syncLoginTitle">강사 로그인</h2><input id="syncEmail" type="email" autocomplete="username" placeholder="이메일" required><input id="syncPassword" type="password" autocomplete="current-password" placeholder="비밀번호" required><p id="syncError" class="sync-error" role="alert"></p><button type="submit">로그인</button></form>
 </div>
 
 <script>
@@ -365,7 +374,7 @@ table.tbl td:first-child{color:var(--sub)}
   var minis = [];
   var lastFocus = null;
 
-  function show(i){
+  function show(i, fromSync){
     idx = Math.max(0, Math.min(total - 1, i));
     slides.forEach(function(s, n){
       s.classList.toggle('active', n === idx);
@@ -377,6 +386,7 @@ table.tbl td:first-child{color:var(--sub)}
     navNext.disabled = idx === total - 1;
     minis.forEach(function(m, n){ m.classList.toggle('current', n === idx); });
     lsSet(STORAGE_KEY, String(idx));
+    if (!fromSync) window.dispatchEvent(new CustomEvent('webslide:change', { detail: idx }));
   }
 
   function scaleMinis(){
@@ -541,8 +551,50 @@ table.tbl td:first-child{color:var(--sub)}
     gridList.appendChild(mini);
     minis.push(mini);
   });
+  window.webSlideSync = { show: function(n){ show(n, true); }, getIndex: function(){ return idx; }, stage: stage };
   show(idx);
 })();
+</script>
+<script src="firebase/firebase-config.js"></script>
+<script type="module">
+import { isConfigured, createSync } from './firebase/firebase-sync.js';
+
+const params = new URLSearchParams(location.search);
+const wantsAdmin = params.has('admin');
+const freeView = params.has('view');
+const badge = document.getElementById('syncBadge');
+const login = document.getElementById('syncLogin');
+const error = document.getElementById('syncError');
+let locked = true;
+let admin = false;
+
+function state(text){ badge.hidden = !text; badge.textContent = text; }
+if (!isConfigured(window.FIREBASE_CONFIG)) {
+  state('Firebase 설정 필요');
+} else {
+  const sync = createSync(window.FIREBASE_CONFIG, window.DECK_ID || 'my-lecture-0927');
+  sync.onConnection((online) => state(online ? (admin ? '관리자 연결' : '발표자 연결') : '재연결 중'));
+  sync.onState((data) => {
+    if (!data) { state('상태 읽기 실패'); return; }
+    locked = !!data.locked;
+    if (!admin && !freeView) window.webSlideSync.show(data.slide | 0);
+  });
+  sync.onAdmin((isAdmin, user) => {
+    admin = isAdmin;
+    if (admin) { login.hidden = true; state('관리자 연결'); }
+    else if (wantsAdmin && user) { error.textContent = '관리자 목록에 없는 계정'; login.hidden = false; }
+  });
+  if (wantsAdmin) setTimeout(() => { if (!admin) login.hidden = false; }, 700);
+  document.getElementById('syncLoginForm').addEventListener('submit', async (event) => {
+    event.preventDefault(); error.textContent = '';
+    try { await sync.login(document.getElementById('syncEmail').value.trim(), document.getElementById('syncPassword').value); }
+    catch (e) { error.textContent = '로그인 실패 · 이메일·비밀번호 확인'; }
+  });
+  window.addEventListener('webslide:change', (event) => { if (admin) sync.setSlide(event.detail).catch(() => state('저장 실패')); });
+  const blockViewer = (event) => { if (locked && !admin && !freeView) { event.preventDefault(); event.stopImmediatePropagation(); } };
+  window.webSlideSync.stage.addEventListener('click', blockViewer, true);
+  document.addEventListener('keydown', (event) => { if (locked && !admin && !freeView && ['ArrowLeft','ArrowRight','PageDown','PageUp','Home','End',' '].includes(event.key)) blockViewer(event); }, true);
+}
 </script>
 </body>
 </html>
